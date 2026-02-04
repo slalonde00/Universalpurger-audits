@@ -4,8 +4,16 @@
 4. connect the usb key to a compuuter you wish to erasee data on
 5. boot onto the usb key
 6. use memtest86 to test the ram
-7. install the depenaancies using the following command :   
+7. install the dependancies using the following command :  
+
 sudo apt update && sudo apt install smartmontools nvme-cli GnuPG openssh-client -y
+
 8.  rendez le acript exécutable avec la commande : 
+
 chmod +x wipe_audit.sh
-9. exécutez le script en utilisant : sudo ./wipe_audit.sh
+
+9. exécutez le script en utilisant : 
+
+sudo ./wipe_audit.sh
+
+10. suivez les instructions à l'écran pour utiliser le script et effacer des disque et pour envoyer un rapport signé unique à un serveur distance de votre choix
