@@ -6,17 +6,14 @@
 
 sudo apt update && sudo apt install smartmontools nvme-cli GnuPG openssh-client -y
 
-8.  rendez le script exécutable avec la commande : 
+8.  right-click on the .desktop file and click on allow running
 
-chmod +x nist-wipe.sh
+9. go to the folder that you disk is mounted in. by default this is /dev
 
-9. exécutez le script en utilisant : 
+10. drag the folder your disk is mounted in and drop it onto the .desktop file.
 
-sudo ./nist-wipe.sh /dev/*répertoire du disque 
+11. when you are done initalitize the disk in a disk manager et format it with the file system of your choice.
 
-par exemple : 
-
-sudo ./nist-wipe.sh /dev/sdb pour votre disque primaire ou 
-sudo ./nist-wipe.sh /dev/sdc pour un disque secondaire and so on.
+12. enjoy your gov. level erased disk ready for re-use.
 
 
