@@ -1,45 +1,36 @@
 #!/bin/bash
 set -euo pipefail
 
-# --- FORCE TERMINAL (for double-click) ---
-if [[ -z "${TERM:-}" ]]; then
-    if command -v gnome-terminal &>/dev/null; then
-        gnome-terminal -- bash "$0" "$@"
-    elif command -v xfce4-terminal &>/dev/null; then
-        xfce4-terminal -e "bash $0 $*"
-    else
-        echo "Terminal non détecté. Exécutez depuis un terminal."
-        exit 1
-    fi
-    exit
+# --- REQUIRE ROOT ---
+if [[ $EUID -ne 0 ]]; then
+    echo -e "\e[31mErreur: Exécutez en ROOT.\e[0m"
+    exit 1
 fi
 
 # --- DEPENDENCIES ---
-# Ensure required commands exist: dd, sha256sum, blkdiscard, nvme
-REQUIRED_CMDS=(dd sha256sum blkdiscard nvme)
+REQUIRED_CMDS=(dd sha256sum blkdiscard nvme lsblk findmnt)
 MISSING_CMDS=()
 for cmd in "${REQUIRED_CMDS[@]}"; do
-    if ! command -v $cmd &>/dev/null; then
+    if ! command -v "$cmd" &>/dev/null; then
         MISSING_CMDS+=("$cmd")
     fi
 done
 
 if [ ${#MISSING_CMDS[@]} -gt 0 ]; then
-    echo -e "\e[33mInstallation des dépendances manquantes : ${MISSING_CMDS[*]}\e[0m"
-    apt update
-    apt install -y "${MISSING_CMDS[@]}"
-fi
-
-# --- REQUIRE ROOT ---
-if [[ $EUID -ne 0 ]]; then
-    echo -e "\e[31mErreur: Exécutez en ROOT.\e[0m"
-    read -p "Appuyez sur Entrée pour quitter..."
-    exit 1
+    echo -e "\e[33mDépendances manquantes : ${MISSING_CMDS[*]}\e[0m"
+    if command -v apt &>/dev/null; then
+        echo "Tentative d'installation via apt..."
+        apt update
+        apt install -y "${MISSING_CMDS[@]}" || echo "Impossible d'installer certaines dépendances, vérifiez manuellement."
+    else
+        echo "Veuillez installer les dépendances manuellement."
+    fi
 fi
 
 # --- PARSE ARGUMENTS ---
 SELECTED_DISKS=""
 MODE="interactive"
+DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -51,6 +42,9 @@ while [[ $# -gt 0 ]]; do
         --all)
             MODE="all"
             ;;
+        --dry-run)
+            DRY_RUN=1
+            ;;
         *)
             echo "Argument inconnu: $1"
             exit 1
@@ -59,7 +53,7 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-# --- GET ROOT DISK (live USB detection) ---
+# --- DETECT LIVE USB ROOT ---
 ROOT_DISK=$(findmnt -no SOURCE / | sed 's/[0-9]*$//')
 
 # --- INTERACTIVE MODE ---
@@ -68,7 +62,6 @@ if [[ "$MODE" == "interactive" ]]; then
     read -p "Email pour identification (logs locaux) : " GPG_USER
 
     echo -e "\n\e[33m[DISQUES DISPONIBLES]\e[0m"
-
     mapfile -t DISK_LIST < <(lsblk -dno NAME,SIZE,ROTA,TYPE,MODEL | grep -v "loop" || true)
 
     echo "0) TOUS LES DISQUES (sauf OS live USB)"
@@ -106,43 +99,73 @@ fi
 
 echo -e "\nDisques sélectionnés : $SELECTED_DISKS"
 
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo -e "\nDRY RUN activé — aucune donnée ne sera effacée."
+    exit 0
+fi
+
 read -p "Tapez ERASE pour confirmer : " CONFIRM
 if [[ "$CONFIRM" != "ERASE" ]]; then
     echo "Annulé."
     exit 0
 fi
 
-# --- WIPE HDD ---
-wipe_hdd() {
+# --- PROGRESS BAR FUNCTION ---
+progress_bar() {
+    local PROGRESS=$1
+    local WIDTH=50
+    local FILLED=$((PROGRESS*WIDTH/100))
+    local EMPTY=$((WIDTH-FILLED))
+    printf "\r["
+    for ((i=0;i<FILLED;i++)); do printf "#"; done
+    for ((i=0;i<EMPTY;i++)); do printf "-"; done
+    printf "] %3d%%" "$PROGRESS"
+}
+
+# --- WIPE FUNCTIONS ---
+wipe_disk() {
     local DISK="$1"
     local SIZE=$(blockdev --getsize64 "$DISK")
+    local BLOCK=4194304  # 4MB
+
+    echo "Effacement du disque $DISK..."
 
     for PASS in 1 2 3; do
-        echo -e "\n-- Passe $PASS --"
-
         INPUT="/dev/urandom"
         [[ $PASS -eq 3 ]] && INPUT="/dev/zero"
 
-        echo "Effacement en cours... (passe $PASS)"
-        dd if="$INPUT" of="$DISK" bs=4M status=progress conv=notrunc
+        echo -e "\nPasse $PASS/3 sur $DISK..."
 
-        echo "Passe $PASS terminée."
+        # Using dd with pv style progress
+        dd if="$INPUT" of="$DISK" bs=$BLOCK conv=notrunc status=progress 2>&1 | \
+        while read -r line; do
+            if [[ "$line" =~ ([0-9]+) ]]; then
+                COUNT=${BASH_REMATCH[1]}
+                PERCENT=$((COUNT*100/SIZE))
+                ((PERCENT>100)) && PERCENT=100
+                progress_bar $PERCENT
+            fi
+        done
+
+        echo -e "\nPasse $PASS terminée."
     done
 
-    echo "Vérification SHA256..."
-    HASH=$(dd if="$DISK" bs=4M status=none | sha256sum | awk '{print $1}')
+    echo "SHA256 vérification..."
+    HASH=$(dd if="$DISK" bs=$BLOCK status=none | sha256sum | awk '{print $1}')
     echo "SHA256: $HASH"
 }
 
-# --- WIPE SSD/NVMe ---
-wipe_nvme() {
+wipe_nvme_ssd() {
     local DISK="$1"
+    echo "Effacement du SSD/NVMe $DISK..."
     if command -v nvme &>/dev/null; then
-        echo "Format NVMe via nvme-cli..."
-        nvme format "$DISK" --ses=2 --force || nvme format "$DISK" --ses=1 --force
+        echo "Tentative nvme format..."
+        nvme format "$DISK" --ses=2 --force || nvme format "$DISK" --ses=1 --force || echo "Échec nvme format, utilisation de dd..."
+        wipe_disk "$DISK"  # fallback progress via dd
     else
-        echo "Utilisation de blkdiscard..."
-        blkdiscard "$DISK" || echo "Échec blkdiscard (vérifiez support matériel)"
+        echo "blkdiscard..."
+        blkdiscard "$DISK" || echo "Échec blkdiscard, utilisation de dd..."
+        wipe_disk "$DISK"
     fi
 }
 
@@ -150,12 +173,12 @@ wipe_nvme() {
 for DISK in $SELECTED_DISKS; do
     echo -e "\nTraitement de $DISK"
 
-    ROTA=$(lsblk -dno ROTA "$DISK")
+    ROTA=$(lsblk -dno ROTA "$DISK" || echo 1)
 
     if [[ "$DISK" == *nvme* ]] || [[ "$ROTA" -eq 0 ]]; then
-        wipe_nvme "$DISK"
+        wipe_nvme_ssd "$DISK"
     else
-        wipe_hdd "$DISK"
+        wipe_disk "$DISK"
     fi
 done
 
